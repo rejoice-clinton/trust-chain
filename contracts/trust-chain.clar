@@ -173,3 +173,170 @@
     (ok true)
   )
 )
+
+;; Modify existing reputation action parameters and status
+(define-public (update-reputation-action
+    (action-type (string-ascii 50))
+    (multiplier uint)
+    (description (string-ascii 100))
+    (active bool)
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-ADMIN))
+    ;; Validate action-type is not empty
+    (asserts! (> (len action-type) u0) (err ERR-INVALID-PARAMETERS))
+    ;; Validate multiplier is reasonable (0-100 range)
+    (asserts! (<= multiplier u100) (err ERR-INVALID-PARAMETERS))
+    ;; Validate description is not empty
+    (asserts! (> (len description) u0) (err ERR-INVALID-PARAMETERS))
+    ;; Check action exists
+    (asserts!
+      (is-some (map-get? reputation-actions { action-type: action-type }))
+      (err ERR-ACTION-NOT-FOUND)
+    )
+    (map-set reputation-actions { action-type: action-type } {
+      multiplier: multiplier,
+      description: description,
+      active: active,
+    })
+    (ok true)
+  )
+)
+
+;; Bootstrap the contract with standard Bitcoin ecosystem reputation actions
+(define-public (initialize-reputation-actions)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) (err ERR-NOT-ADMIN))
+    (map-set reputation-actions { action-type: "lightning-routing" } {
+      multiplier: u8,
+      description: "Successful Lightning Network payment routing",
+      active: true,
+    })
+    (map-set reputation-actions { action-type: "btc-lending-repay" } {
+      multiplier: u12,
+      description: "Timely repayment of Bitcoin-collateralized loans",
+      active: true,
+    })
+    (map-set reputation-actions { action-type: "layer2-validation" } {
+      multiplier: u6,
+      description: "Participation in Layer 2 consensus validation",
+      active: true,
+    })
+    (map-set reputation-actions { action-type: "channel-maintenance" } {
+      multiplier: u4,
+      description: "Maintaining healthy Lightning Network channels",
+      active: true,
+    })
+    (map-set reputation-actions { action-type: "protocol-governance" } {
+      multiplier: u7,
+      description: "Active participation in protocol governance",
+      active: true,
+    })
+    (ok true)
+  )
+)
+
+;; HELPER FUNCTIONS
+
+;; Validate that a principal has a registered identity and is the transaction sender
+(define-private (is-valid-owner (owner principal))
+  (and
+    (is-some (map-get? identities { owner: owner }))
+    (is-eq owner tx-sender)
+  )
+)
+
+;; Create immutable audit trail entry for reputation score changes
+(define-private (log-reputation-change
+    (owner principal)
+    (action-type (string-ascii 50))
+    (previous-score uint)
+    (new-score uint)
+  )
+  (map-set reputation-history {
+    owner: owner,
+    tx-id: stacks-block-height,
+  } {
+    action-type: action-type,
+    previous-score: previous-score,
+    new-score: new-score,
+    timestamp: burn-block-height,
+    block-height: stacks-block-height,
+  })
+)
+
+;; Retrieve the scoring multiplier for a specific action type
+(define-private (get-action-multiplier (action-type (string-ascii 50)))
+  (default-to u0
+    (get multiplier (map-get? reputation-actions { action-type: action-type }))
+  )
+)
+
+;; Check whether a reputation action type is currently enabled
+(define-private (is-action-active (action-type (string-ascii 50)))
+  (default-to false
+    (get active (map-get? reputation-actions { action-type: action-type }))
+  )
+)
+
+;; Safely retrieve identity data for a given principal
+(define-private (get-identity-field (owner principal))
+  (map-get? identities { owner: owner })
+)
+
+;; Determine if reputation decay should be applied based on time elapsed
+(define-private (should-decay (last-decay uint))
+  (>= (- stacks-block-height last-decay) (var-get decay-period))
+)
+
+;; IDENTITY MANAGEMENT
+
+;; Register a new decentralized identity with initial reputation score
+(define-public (create-identity (did (string-ascii 50)))
+  (let (
+      (sender tx-sender)
+      (current-block-height stacks-block-height)
+    )
+    (begin
+      ;; Check contract is active
+      (asserts! (var-get contract-active) (err ERR-NOT-ACTIVE))
+      ;; Check if identity already exists
+      (asserts! (is-none (map-get? identities { owner: sender }))
+        (err ERR-IDENTITY-EXISTS)
+      )
+      ;; Validate DID meets minimum requirements
+      (asserts! (> (len did) MINIMUM_DID_LENGTH) (err ERR-INVALID-PARAMETERS))
+      ;; Create identity record
+      (map-set identities { owner: sender } {
+        did: did,
+        reputation-score: (var-get starting-reputation),
+        created-at: current-block-height,
+        last-updated: current-block-height,
+        last-decay: current-block-height,
+        total-actions: u0,
+        active: true,
+      })
+      (ok did)
+    )
+  )
+)
+
+;; Enable or disable an existing identity
+(define-public (update-identity-status (active bool))
+  (let (
+      (sender tx-sender)
+      (current-identity (unwrap! (map-get? identities { owner: sender })
+        (err ERR-IDENTITY-NOT-FOUND)
+      ))
+    )
+    (begin
+      (map-set identities { owner: sender }
+        (merge current-identity {
+          active: active,
+          last-updated: stacks-block-height,
+        })
+      )
+      (ok true)
+    )
+  )
+)
